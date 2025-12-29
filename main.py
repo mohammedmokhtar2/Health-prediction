@@ -1,25 +1,40 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import joblib
 import numpy as np
 import pandas as pd
+import os
 
-# Initialize App
+# 1. Initialize the App
 app = FastAPI(title="Vital Signs AI Monitor")
 
-# --- LOAD ARTIFACTS ---
-# We load these once when the app starts so it's fast
-try:
-    model = joblib.load("model.pkl")
-    scaler = joblib.load("scaler.pkl")
-    encoder = joblib.load("encoder.pkl")
-    print("✅ Model, Scaler, and Encoder loaded successfully.")
-except Exception as e:
-    print(f"❌ Error loading files: {e}")
-    print("Did you copy the .pkl files into the same folder?")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  
+    allow_credentials=True,
+    allow_methods=["*"],  
+    allow_headers=["*"],
+)
 
-# --- DEFINE INPUT DATA ---
-# This ensures the user sends exactly what we need
+
+artifacts = {}
+
+@app.on_event("startup")
+def load_artifacts():
+    try:
+        
+        artifacts["model"] = joblib.load("model.pkl")
+        artifacts["scaler"] = joblib.load("scaler.pkl")
+        artifacts["encoder"] = joblib.load("encoder.pkl")
+        print("✅ Artifacts loaded successfully: model.pkl, scaler.pkl, encoder.pkl")
+    except FileNotFoundError as e:
+        print(f"❌ CRITICAL ERROR: Could not find model files! {e}")
+        print("Make sure model.pkl, scaler.pkl, and encoder.pkl are in the SAME folder as main.py")
+    except Exception as e:
+        print(f"❌ Error loading artifacts: {e}")
+
+
 class VitalSigns(BaseModel):
     heart_rate: float
     blood_pressure: float
@@ -27,16 +42,20 @@ class VitalSigns(BaseModel):
     respiratory_rate: float
     temperature: float
 
+
 @app.get("/")
 def home():
-    return {"message": "Vital Signs AI is running. Send POST requests to /predict"}
+    return {"message": "Vital Signs AI is RUNNING. Send a POST request to /predict to use it."}
+
 
 @app.post("/predict")
 def predict_condition(vitals: VitalSigns):
+    
+    if "model" not in artifacts:
+        raise HTTPException(status_code=500, detail="Model files not loaded. Check server logs.")
+
     try:
-        # 1. Prepare Data
-        # We must keep the EXACT same order as training: 
-        # [heart_rate, blood_pressure, oxygen_saturation, respiratory_rate, temperature]
+        
         input_data = np.array([[
             vitals.heart_rate,
             vitals.blood_pressure,
@@ -45,20 +64,22 @@ def predict_condition(vitals: VitalSigns):
             vitals.temperature
         ]])
 
-        # 2. Scale Data (CRITICAL STEP)
-        # The model expects scaled numbers (Z-scores), not raw values
+        
+        scaler = artifacts["scaler"]
         scaled_data = scaler.transform(input_data)
 
-        # 3. Predict
-        prediction_index = model.predict(scaled_data)
+        
+        model = artifacts["model"]
+        prediction_index = model.predict(scaled_data) # Returns [0], [1], or [2]
 
-        # 4. Decode Label
-        # Converts 0/1/2 back to "Safe", "Warning", "Critical"
+        
+        encoder = artifacts["encoder"]
         result_label = encoder.inverse_transform(prediction_index)[0]
 
+        
         return {
-            "prediction": result_label,
-            "status_code": int(prediction_index[0]), # 0, 1, or 2
+            "prediction": result_label,          # "Safe", "Warning", or "Critical"
+            "status_code": int(prediction_index[0]), # 0, 1, or 2 (useful for hardware logic)
             "input_received": vitals
         }
 
